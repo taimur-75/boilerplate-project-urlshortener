@@ -33,7 +33,7 @@ app.use('/public', express.static(`${process.cwd()}/public`));
 // Define the Mongoose schema for URL storage
 const urlSchema = new mongoose.Schema({
   original_url: { type: String, required: true }, // Original URL to be shortened
-  short_url: { type: Number }                    // Shortened URL ID (unique)
+  short_url: { type: Number, unique: true }       // Shortened URL ID (unique)
 });
 
 // Create a model from the schema to interact with the database
@@ -69,9 +69,14 @@ app.post('/api/shorturl', (req, res) => {
 
     // Check if the URL has already been shortened by looking it up in the database
     Url.findOne({ original_url: originalUrl }, (err, foundUrl) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Internal Server Error' });
+      }
+      
       if (foundUrl) {
         // If the URL is already in the database, return the existing short URL
-        res.json({ original_url: foundUrl.original_url, short_url: foundUrl.short_url });
+        return res.json({ original_url: foundUrl.original_url, short_url: foundUrl.short_url });
       } else {
         // If the URL is new, create a new entry in the database with a unique short_url
         const newUrl = new Url({
@@ -81,7 +86,10 @@ app.post('/api/shorturl', (req, res) => {
 
         // Save the new URL entry to the database
         newUrl.save((err, data) => {
-          if (err) return console.error(err);
+          if (err) {
+            console.error(err);
+            return res.status(500).json({ error: 'Internal Server Error' });
+          }
 
           // Respond with the original URL and the new short URL
           res.json({ original_url: data.original_url, short_url: data.short_url });
@@ -94,10 +102,15 @@ app.post('/api/shorturl', (req, res) => {
 
 // GET endpoint to redirect users to the original URL based on the short_url
 app.get('/api/shorturl/:short_url', (req, res) => {
-  const shortUrl = parseInt(req.params.short_url); // Get the short_url from the URL parameters
+  const shortUrl = parseInt(req.params.short_url, 10); // Get the short_url from the URL parameters
 
   // Find the original URL in the database using the short_url
   Url.findOne({ short_url: shortUrl }, (err, foundUrl) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+
     if (foundUrl) {
       // If the short_url is found, redirect to the original URL
       res.redirect(foundUrl.original_url);
