@@ -1,127 +1,115 @@
 // Load environment variables from the .env file
 require('dotenv').config();
 
-const express = require('express');        // Import Express for creating the web server
-const cors = require('cors');              // Import CORS for cross-origin resource sharing
-const mongoose = require('mongoose');      // Import Mongoose for MongoDB interaction
-const bodyParser = require('body-parser'); // Import body-parser for handling POST request body
-const dns = require('dns');                // Import DNS for validating URLs
+const express = require('express');
+const cors = require('cors');
+const mongoose = require('mongoose');
+const bodyParser = require('body-parser');
+const dns = require('dns');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
-const app = express();                     // Initialize Express application
-
-// Load port from environment variables or default to 3000
+const app = express();
 const port = process.env.PORT || 3000;
 
-// Establish MongoDB connection using Mongoose
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true
 });
 
-// Log if MongoDB connection is successful
 mongoose.connection.on('connected', () => {
   console.log('Connected to MongoDB');
 });
 
-// Middleware setup
-app.use(cors());                           // Enable CORS for all routes
-app.use(bodyParser.urlencoded({ extended: false })); // Parse incoming POST requests
-
-// Serve static files from the 'public' directory
-app.use('/public', express.static(`${process.cwd()}/public`));
-
-// Define the Mongoose schema for URL storage
-const urlSchema = new mongoose.Schema({
-  original_url: { type: String, required: true }, // Original URL to be shortened
-  short_url: { type: Number, unique: true }       // Shortened URL ID (unique)
+mongoose.connection.on('error', (err) => {
+  console.error('Mongoose connection error:', err);
 });
 
-// Create a model from the schema to interact with the database
+app.use(helmet());
+app.use(cors());
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
+
+app.use(limiter);
+
+const urlSchema = new mongoose.Schema({
+  original_url: { type: String, required: true },
+  short_url: { type: Number, unique: true }
+});
+
 const Url = mongoose.model('Url', urlSchema);
 
-// Serve the index.html file when accessing the root URL
+// Initialize short URL counter
+let shortUrlCounter = 1;
+
+// Function to generate unique short URL
+const generateShortUrl = () => {
+  return shortUrlCounter++;
+};
+
 app.get('/', (req, res) => {
   res.sendFile(process.cwd() + '/views/index.html');
 });
 
-// Placeholder for generating unique short URL IDs
-let shortUrlCounter = 1;
-
-// POST endpoint to create a shortened URL
-app.post('/api/shorturl', (req, res) => {
-  const originalUrl = req.body.url;              // Get the URL from the request body
-
-  // Validate the format of the URL using a simple regex pattern
-  const urlRegex = /^(https?:\/\/)(www\.)?[\w\-]+\.\w+/;
-  if (!urlRegex.test(originalUrl)) {
-    return res.json({ error: 'invalid url' });  // If the URL is invalid, return an error
-  }
-
-  // Extract the hostname for DNS lookup to verify if the domain is valid
-  const urlObj = new URL(originalUrl);
-  const hostname = urlObj.hostname;
-
-  // Perform DNS lookup to check if the hostname resolves to a valid IP
-  dns.lookup(hostname, (err) => {
-    if (err) {
-      return res.json({ error: 'invalid url' }); // If DNS lookup fails, return an error
+app.post('/api/shorturl', async (req, res) => {
+  try {
+    const originalUrl = req.body.url;
+    const urlRegex = /^(https?:\/\/)(www\.)?[\w\-]+\.\w+/;
+    if (!urlRegex.test(originalUrl)) {
+      return res.status(400).json({ error: 'Invalid URL' });
     }
 
-    // Check if the URL has already been shortened by looking it up in the database
-    Url.findOne({ original_url: originalUrl }, (err, foundUrl) => {
-      if (err) {
-        console.error(err);
-        return res.status(500).json({ error: 'Internal Server Error' });
-      }
-      
-      if (foundUrl) {
-        // If the URL is already in the database, return the existing short URL
-        return res.json({ original_url: foundUrl.original_url, short_url: foundUrl.short_url });
-      } else {
-        // If the URL is new, create a new entry in the database with a unique short_url
-        const newUrl = new Url({
-          original_url: originalUrl,
-          short_url: shortUrlCounter
-        });
+    const urlObj = new URL(originalUrl);
+    const hostname = urlObj.hostname;
 
-        // Save the new URL entry to the database
-        newUrl.save((err, data) => {
-          if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Internal Server Error' });
-          }
-
-          // Respond with the original URL and the new short URL
-          res.json({ original_url: data.original_url, short_url: data.short_url });
-          shortUrlCounter++; // Increment the counter for the next short URL
-        });
-      }
+    await new Promise((resolve, reject) => {
+      dns.lookup(hostname, (err) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
     });
-  });
+
+    const existingUrl = await Url.findOne({ original_url: originalUrl });
+    if (existingUrl) {
+      return res.json({ original_url: existingUrl.original_url, short_url: existingUrl.short_url });
+    }
+
+    const newUrl = new Url({
+      original_url: originalUrl,
+      short_url: generateShortUrl()
+    });
+
+    await newUrl.save();
+    res.json({ original_url: newUrl.original_url, short_url: newUrl.short_url });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
 
-// GET endpoint to redirect users to the original URL based on the short_url
-app.get('/api/shorturl/:short_url', (req, res) => {
-  const shortUrl = parseInt(req.params.short_url, 10); // Get the short_url from the URL parameters
-
-  // Find the original URL in the database using the short_url
-  Url.findOne({ short_url: shortUrl }, (err, foundUrl) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: 'Internal Server Error' });
-    }
-
+app.get('/api/shorturl/:short_url', async (req, res) => {
+  try {
+    const shortUrl = parseInt(req.params.short_url, 10);
+    const foundUrl = await Url.findOne({ short_url: shortUrl });
     if (foundUrl) {
-      // If the short_url is found, redirect to the original URL
       res.redirect(foundUrl.original_url);
     } else {
-      // If the short_url is not found, return an error
-      res.json({ error: 'No short URL found' });
+      res.status(404).json({ error: 'Not Found' });
     }
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
 
-// Start the server and listen on the specified port
 app.listen(port, () => {
   console.log(`Listening on port ${port}`);
 });
