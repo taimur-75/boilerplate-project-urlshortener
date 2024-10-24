@@ -15,7 +15,8 @@
     "express-rate-limit": "^7.4.1",
     "helmet": "^8.0.0",
     "is-url": "^1.2.4",
-    "mongoose": "^8.7.2"
+    "mongoose": "^8.7.2",
+    "url-parse": "^1.5.10"
   },
   "license": "MIT"
 }
